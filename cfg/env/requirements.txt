@@ -1,0 +1,6 @@
+# aimrt_py==1.7.1 # 需要手动安装 cfg/env/aimrt-py-1.7.1-cp310-cp310-linux_*.whl
+rerun-sdk==0.36.3
+pyorbbecsdk2
+pyyaml
+opencv-python==4.14.0.94
+numpy==2.2.6
