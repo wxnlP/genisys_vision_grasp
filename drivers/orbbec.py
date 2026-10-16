@@ -5,7 +5,7 @@ from pathlib import Path
 from pyorbbecsdk import (
                 Pipeline, Config,
                 OBSensorType, OBFormat, OBAlignMode,
-                Context,
+                Context, OBPropertyID,
             )
 
 
@@ -24,7 +24,7 @@ class OrbbecCamera:
 
         plist = self._pipeline.get_stream_profile_list(OBSensorType.COLOR_SENSOR)
         try:
-            cp = plist.get_video_stream_profile(self._w, self._h, OBFormat.MJPG, self._fps)
+            cp = plist.get_video_stream_profile(self._w, self._h, OBFormat.RGB, self._fps)
         except Exception:
             cp = plist.get_default_video_stream_profile()
         cfg.enable_stream(cp)
@@ -46,6 +46,13 @@ class OrbbecCamera:
             self._pipeline.stop()
             cfg.set_align_mode(OBAlignMode.SW_MODE)
             self._pipeline.start(cfg)
+
+        try:
+            self._pipeline.get_device().set_int_property(
+                OBPropertyID.OB_PROP_COLOR_SHARPNESS_INT, 75
+            )
+        except Exception as e:
+            print(f"[OrbbecCamera] set color sharpness failed: {e}")
 
         # Intrinsics（内参）
         intr = cp.get_intrinsic()
