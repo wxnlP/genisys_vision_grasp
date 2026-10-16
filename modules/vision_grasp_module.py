@@ -1,3 +1,5 @@
+from tabnanny import verbose
+
 import aimrt_py as aimrt
 from protocols.joint_state_pb2 import JointStateArray
 from protocols.pose_pb2 import PoseStamped
@@ -5,6 +7,7 @@ import yaml
 
 from drivers.http_rpc import RpcClient
 from drivers.orbbec import OrbbecCamera
+from ultralytics import YOLO
 
 import time
 import datetime
@@ -22,6 +25,7 @@ class VisionGraspModule(aimrt.ModuleBase):
 
         self.camera = OrbbecCamera(width=848, height=530, fps=30)
         self.rpc = RpcClient()
+        self.model = None
 
         self.running = False
         self.loop_exit = False
@@ -40,9 +44,13 @@ class VisionGraspModule(aimrt.ModuleBase):
         with open(file_path, "r") as f:
             config = yaml.safe_load(f)
             work_executor_name = str(config["work_executor_name"])
+            yolo_model = str(config["yolo_model"])
         
         # 创建任务执行器
         self.work_executor = self.core.GetExecutorManager().GetExecutor(work_executor_name)
+
+        # 初始化 YOLO 模型
+        self.model = YOLO(yolo_model, task= "segment", verbose=False)
 
         return True
 
@@ -69,6 +77,8 @@ class VisionGraspModule(aimrt.ModuleBase):
     def main_loop(self):
         error_count  = 0
         try:
+            cv2.namedWindow("YOLO11-seg", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("YOLO11-seg", 848, 530)
             while self.running:
                 color, depth = self.camera.get_frame()
                 if color is None or depth is None:
@@ -78,8 +88,10 @@ class VisionGraspModule(aimrt.ModuleBase):
                     continue
                 else:
                     error_count = 0
-                cv2.imshow("color", color)
-                cv2.imshow("depth", depth)
+                results = self.model(color, verbose=False)
+                cv2.imshow("YOLO11-seg", results[0].plot())
+                # cv2.imshow("color", color)
+                # cv2.imshow("depth", depth)
                 cv2.waitKey(1)
             self.loop_exit = True
             aimrt.info(self.logger, "VisionGraspModule main loop exited.")
