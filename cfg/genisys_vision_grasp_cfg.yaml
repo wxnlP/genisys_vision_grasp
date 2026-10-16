@@ -48,5 +48,9 @@ aimrt:
 # Module custom configuration
 VisionGraspModule:
   work_executor_name: work_thread_pool
+  camera:
+    width: 1280
+    height: 800
+    fps: 30
   yolo_model: ${AIMRT_SH_DIR}/cfg/models/object-block-11n-seg.engine
 

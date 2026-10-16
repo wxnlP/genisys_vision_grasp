@@ -1,4 +1,5 @@
 from tabnanny import verbose
+from turtle import width
 
 import aimrt_py as aimrt
 from protocols.joint_state_pb2 import JointStateArray
@@ -7,6 +8,7 @@ import yaml
 
 from drivers.http_rpc import RpcClient
 from drivers.orbbec import OrbbecCamera
+from drivers.utils.snapshot import save_color_snapshot, snapshot_requested
 from ultralytics import YOLO
 
 import time
@@ -23,9 +25,12 @@ class VisionGraspModule(aimrt.ModuleBase):
         self.logger = aimrt.LoggerRef()
         self.work_executor = aimrt.ExecutorRef()
 
-        self.camera = OrbbecCamera(width=848, height=530, fps=30)
-        self.rpc = RpcClient()
+        self.camera = None
+        self.rpc = None
         self.model = None
+
+        self.width = 1280
+        self.height = 800
 
         self.running = False
         self.loop_exit = False
@@ -48,6 +53,15 @@ class VisionGraspModule(aimrt.ModuleBase):
         
         # 创建任务执行器
         self.work_executor = self.core.GetExecutorManager().GetExecutor(work_executor_name)
+
+        # 初始化 Orbbec 相机
+        self.width = int(config["camera"]["width"])
+        self.height = int(config["camera"]["height"])
+        fps = int(config["camera"]["fps"])
+        self.camera = OrbbecCamera(self.width, self.height, fps)
+
+        # rpc 初始化
+        self.rpc = RpcClient()
 
         # 初始化 YOLO 模型
         self.model = YOLO(yolo_model, task= "segment", verbose=False)
@@ -78,7 +92,7 @@ class VisionGraspModule(aimrt.ModuleBase):
         error_count  = 0
         try:
             cv2.namedWindow("YOLO11-seg", cv2.WINDOW_NORMAL)
-            cv2.resizeWindow("YOLO11-seg", 848, 530)
+            cv2.resizeWindow("YOLO11-seg", self.width, self.height)
             while self.running:
                 color, depth = self.camera.get_frame()
                 if color is None or depth is None:
@@ -90,7 +104,13 @@ class VisionGraspModule(aimrt.ModuleBase):
                     error_count = 0
                 results = self.model(color, verbose=False)
                 cv2.imshow("YOLO11-seg", results[0].plot())
-                # cv2.imshow("color", color)
+                # if snapshot_requested():
+                #     path = save_color_snapshot(color)
+                #     if path:
+                #         aimrt.info(self.logger, f"snapshot saved: {path}")
+                #     else:
+                #         aimrt.error(self.logger, "snapshot save failed")
+                cv2.imshow("color", color)
                 # cv2.imshow("depth", depth)
                 cv2.waitKey(1)
             self.loop_exit = True
