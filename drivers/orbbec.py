@@ -115,3 +115,7 @@ class OrbbecCamera:
         ).astype(np.uint16)
 
         return color_bgr, depth_mm
+
+    def get_intrinsic(self):
+        if self._K is not None:
+            return self._K
