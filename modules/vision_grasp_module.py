@@ -1,6 +1,3 @@
-from tabnanny import verbose
-from turtle import width
-
 import aimrt_py as aimrt
 from protocols.joint_state_pb2 import JointStateArray
 from protocols.pose_pb2 import PoseStamped
@@ -110,7 +107,7 @@ class VisionGraspModule(aimrt.ModuleBase):
                 #         aimrt.info(self.logger, f"snapshot saved: {path}")
                 #     else:
                 #         aimrt.error(self.logger, "snapshot save failed")
-                cv2.imshow("color", color)
+                # cv2.imshow("color", color)
                 # cv2.imshow("depth", depth)
                 cv2.waitKey(1)
             self.loop_exit = True
