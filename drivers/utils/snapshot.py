@@ -37,12 +37,12 @@ def snapshot_requested() -> bool:
     return False
 
 
-def save_color_snapshot(color, out_dir=SNAP_DIR):
-    """保存一帧原始 BGR 彩图为 PNG，返回路径；失败返回 None。"""
-    if color is None:
+def save_color_snapshot(image, out_dir=SNAP_DIR, prefix="color"):
+    """保存一帧 BGR 图像为 jpg，返回路径；失败返回 None。"""
+    if image is None:
         return None
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    name = datetime.datetime.now().strftime("color_%Y%m%d_%H%M%S_%f")[:-3] + ".jpg"
+    name = datetime.datetime.now().strftime(f"{prefix}_%Y%m%d_%H%M%S_%f")[:-3] + ".jpg"
     path = out_dir / name
-    return str(path) if cv2.imwrite(str(path), color) else None
+    return str(path) if cv2.imwrite(str(path), image) else None

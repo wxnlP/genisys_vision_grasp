@@ -53,4 +53,11 @@ VisionGraspModule:
     height: 530
     fps: 30
   yolo_model: ${AIMRT_SH_DIR}/cfg/models/object-block-11n-seg.engine
-
+  snapshot_event: ["screenshot", "graspnet"]
+  graspnet:
+    gnet_checkpoint: ${AIMRT_SH_DIR}/graspnet_baseline/checkpoint/checkpoint-rs.tar
+    target_margin_px: 12
+    target_expand_ratio: 1.35
+    max_grasp_width_m: 0.09
+    roi_expand_ratio: 1.35
+    roi_margin_px: 20

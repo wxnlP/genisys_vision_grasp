@@ -4,7 +4,7 @@ import sys
 import threading
 
 import aimrt_py
-from modules.vision_grasp_module import VisionGraspModule
+from aimrt_modules.vision_grasp_module import VisionGraspModule
 
 global_aimrt_core = None
 

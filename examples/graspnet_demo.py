@@ -27,6 +27,9 @@ parser.add_argument('--num_point', type=int, default=20000, help='Point Number [
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
 parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
+parser.add_argument('--max_mm', type=int, default=500, help='Max_mm of depth [default: 500]')
+parser.add_argument('--min_mm', type=int, default=40, help='Min_mm of depth [default: 40]')
+
 
 config = parser.parse_args()
 
@@ -79,15 +82,16 @@ def process_data():
     camera_info = CameraInfo(W, H, intr[0][0], intr[1][1], intr[0][2], intr[1][2], 1000.0)
     cloud = create_point_cloud_from_depth_image(depth_mm, camera_info, organized=True)
 
-    depth_ok = depth_mm > 0
+    depth_ok = (depth_mm > config.min_mm) & (depth_mm < config.max_mm)
     cloud_ori  = cloud[depth_ok].astype(np.float32)
+    color_ori = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)[depth_ok].astype(np.float32) / 255.0
 
     # get valid points
     valid = depth_ok
     if mask is not None:
         valid = valid & mask.astype(bool)
     cloud_masked  = cloud[valid].astype(np.float32)
-    color_masked = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)[valid].astype(np.float32)
+    color_masked = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)[valid].astype(np.float32) / 255.0
 
     if len(cloud_masked) >= config.num_point:
         idxs = np.random.choice(len(cloud_masked), config.num_point, replace=False)
@@ -99,8 +103,8 @@ def process_data():
     color_sampled = color_masked[idxs]
 
     cloud = o3d.geometry.PointCloud()
-    cloud.points = o3d.utility.Vector3dVector(cloud_masked)
-    cloud.colors = o3d.utility.Vector3dVector(color_masked)
+    cloud.points = o3d.utility.Vector3dVector(cloud_ori)
+    cloud.colors = o3d.utility.Vector3dVector(color_ori)
 
     end_points = {
         'point_clouds': torch.from_numpy(cloud_sampled[np.newaxis]).to(device),  # (1, N, 3)
@@ -140,7 +144,7 @@ if __name__ == "__main__":
     end_points, cloud, cloud_ori = process_data()
     gg = get_grasps(end_points)
     if config.collision_thresh > 0:
-        collision_detection(gg, cloud_ori)
+        gg = collision_detection(gg, cloud_ori)
     vis_grasps(gg, cloud)
 
     
