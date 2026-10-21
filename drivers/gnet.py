@@ -39,11 +39,19 @@ class Gnet:
 
         self.counts = {}
 
+    def warmup(self):
+        """用随机点跑一次前向与解码，提前完成 CUDA 初始化。"""
+        points = torch.rand((1, self.num_point, 3), dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            out = self.gnet({"point_clouds": points})
+            pred_decode(out)
+        torch.cuda.synchronize()
+
     def build_end_points(self, color_bgr, depth_mm, roi=None, roi_expand_ratio=1.35, roi_margin_px=20):
         depth_mask = (depth_mm > self.min_mm) & (depth_mm < self.max_mm)
         if int(depth_mask.sum()) == 0:
             raise RuntimeError("No valid depth_mm pixels in the configured depth range.")
-        color_rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        # color_rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
 
         h, w = depth_mm.shape
         camera = CameraInfo(w, h, float(self.K[0, 0]), float(self.K[1, 1]), float(self.K[0, 2]), float(self.K[1, 2]), 1000.0)
@@ -65,7 +73,7 @@ class Gnet:
             mask = mask & roi_mask
 
         cloud_masked = cloud[mask]
-        color_masked = color_rgb[mask]
+        color_masked_bgr = color_bgr[mask]
 
         if len(cloud_masked) >= self.num_point:
             idxs = np.random.choice(len(cloud_masked), self.num_point, replace=False)
@@ -78,14 +86,20 @@ class Gnet:
                 axis=0,
             )
 
+        sampled_cloud = cloud_masked[idxs]
+        sampled_bgr = color_masked_bgr[idxs]
+        sampled_color = cv2.cvtColor(
+            sampled_bgr.reshape(-1, 1, 3), cv2.COLOR_BGR2RGB
+        ).reshape(-1, 3).astype(np.float32) / 255.0
+
         end_points = {
-            "point_clouds": torch.from_numpy(cloud_masked[idxs].astype(np.float32)[np.newaxis]).cuda(non_blocking=True),
-            "cloud_colors": color_masked[idxs],
+            "point_clouds": torch.from_numpy(sampled_cloud.astype(np.float32)[np.newaxis]).cuda(non_blocking=True),
+            "cloud_colors": sampled_color,
         }
 
         o3d_cloud = o3d.geometry.PointCloud()
-        o3d_cloud.points = o3d.utility.Vector3dVector(cloud_masked.astype(np.float32))
-        o3d_cloud.colors = o3d.utility.Vector3dVector(color_masked.astype(np.float32))
+        o3d_cloud.points = o3d.utility.Vector3dVector(sampled_cloud.astype(np.float32))
+        o3d_cloud.colors = o3d.utility.Vector3dVector(sampled_color.astype(np.float32))
 
         self.end_points = end_points
         self.o3d_cloud = o3d_cloud
@@ -93,21 +107,28 @@ class Gnet:
 
         self.counts = {"depth_ok": int(depth_mask.sum()), "input": int(mask.sum())}
 
-    def infer_grasp(self):
-        # Forward pass
+    def decode_grasp(self):
+        """前向推理并解码抓取，得到未过滤的候选。"""
         with torch.no_grad():
             self.end_points = self.gnet(self.end_points)
             grasp_preds = pred_decode(self.end_points)
         gg = GraspGroup(grasp_preds[0].detach().cpu().numpy())
+
         self.counts["decoded"] = len(gg)
-
-        if len(gg) > 0 and self.collision_thresh > 0:
-            detector = ModelFreeCollisionDetector(self.raw_cloud, voxel_size=self.voxel_size)
-            collision_mask = detector.detect(gg, approach_dist=0.05, collision_thresh=self.collision_thresh)
-            gg = gg[~collision_mask]
-        self.counts["after_collision"] = len(gg)
-
         self.gg = gg
+        return self.gg
+
+    def detect_collision(self):
+        """对当前候选做碰撞检测。"""
+        if len(self.gg) == 0 or self.collision_thresh <= 0:
+            self.counts["after_collision"] = len(self.gg)
+            return self.gg
+
+        detector = ModelFreeCollisionDetector(self.raw_cloud, voxel_size=self.voxel_size)
+        collision_mask = detector.detect(self.gg, approach_dist=0.05, collision_thresh=self.collision_thresh)
+        self.gg = self.gg[~collision_mask]
+        self.counts["after_collision"] = len(self.gg)
+        return self.gg
 
     def filter_grasps_by_bbox(self, bbox_xyxy, image_shape, margin_px, expand_ratio):
         if len(self.gg) == 0:

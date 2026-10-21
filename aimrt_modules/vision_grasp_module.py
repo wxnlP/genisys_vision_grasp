@@ -96,6 +96,7 @@ class VisionGraspModule(aimrt.ModuleBase):
             self.camera.open()
             if "graspnet" in self.snapshot_events:
                 self.gnet = Gnet(self.gnet_checkpoint, self.camera.get_intrinsic())
+                self.gnet.warmup()
                 aimrt.info(self.logger, f"GraspNet loaded: {self.gnet_checkpoint}")
 
             self.work_executor.ExecuteAfter(datetime.timedelta(milliseconds=500), self.main_loop)
@@ -184,8 +185,9 @@ class VisionGraspModule(aimrt.ModuleBase):
             self.gnet.build_end_points(color, depth, roi=roi,
                                        roi_expand_ratio=self.roi_expand_ratio,
                                        roi_margin_px=self.roi_margin_px)
-            self.gnet.infer_grasp()
+            self.gnet.decode_grasp()
             self.gnet.filter_grasps_by_bbox(bbox, depth.shape, self.target_margin_px, self.target_expand_ratio)
+            self.gnet.detect_collision()
             self.gnet.filter_grasps_by_width(self.max_grasp_width_m)
             best = self.gnet.select_best_grasp()
         except Exception as e:
@@ -200,8 +202,8 @@ class VisionGraspModule(aimrt.ModuleBase):
                    f"  depth_ok={c.get('depth_ok', 0)} \n"
                    f"  input={c.get('input', 0)} \n"
                    f"  decoded={c.get('decoded', 0)} \n"
-                   f"  after_collision={c.get('after_collision', 0)} \n"
                    f"  after_bbox={c.get('after_bbox', 0)} \n"
+                   f"  after_collision={c.get('after_collision', 0)} \n"
                    f"  after_width={c.get('after_width', 0)} \n"
                    f"  final={c.get('final', 0)}\n---")
 
