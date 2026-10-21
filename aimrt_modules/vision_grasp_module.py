@@ -98,7 +98,7 @@ class VisionGraspModule(aimrt.ModuleBase):
                 self.gnet = Gnet(self.gnet_checkpoint, self.camera.get_intrinsic())
                 self.gnet.warmup()
                 aimrt.info(self.logger, f"GraspNet loaded: {self.gnet_checkpoint}")
-
+            
             self.work_executor.ExecuteAfter(datetime.timedelta(milliseconds=500), self.main_loop)
         except Exception as e:
             aimrt.error(self.logger, f"VisionGraspModule Start failed: {e}")
@@ -118,6 +118,11 @@ class VisionGraspModule(aimrt.ModuleBase):
     def main_loop(self):
         error_count  = 0
         try:
+            try:
+                self.grasp_vis = Open3DGraspWindow("GraspNet Grasps", top_k=50, width=self.width, height=self.height)
+            except Exception as e:
+                self.grasp_vis_broken = True
+                aimrt.error(self.logger, f"Open3D window unavailable: {e}")
             cv2.namedWindow("YOLO-seg", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("YOLO-seg", self.width, self.height)
             while self.running:
@@ -194,7 +199,8 @@ class VisionGraspModule(aimrt.ModuleBase):
             aimrt.error(self.logger, f"grasp inference failed: {e}")
             return
 
-        self.update_grasp_vis()
+        if not self.grasp_vis_broken:
+            self.grasp_vis.update(self.gnet.o3d_cloud, self.gnet.gg)
 
         c = self.gnet.counts
         aimrt.info(self.logger,
@@ -229,17 +235,4 @@ class VisionGraspModule(aimrt.ModuleBase):
                    f"\n---\ngrasp in end-effector frame (hand-eye): \n"
                    f"  xyz        = {[round(float(v), 6) for v in xyz]}  (m) \n"
                    f"  quaternion = {[round(float(v), 6) for v in quat]}  (w, x, y, z) \n---")
-
-    def update_grasp_vis(self):
-        """刷新 Open3D 窗口；创建失败（无显示等）只禁用可视化，不影响主流程。"""
-        if self.grasp_vis_broken:
-            return
-        if self.grasp_vis is None:
-            try:
-                self.grasp_vis = Open3DGraspWindow("GraspNet Grasps", top_k=50)
-            except Exception as e:
-                self.grasp_vis_broken = True
-                aimrt.error(self.logger, f"Open3D window unavailable, visualization disabled: {e}")
-                return
-        self.grasp_vis.update(self.gnet.o3d_cloud, self.gnet.gg)
-
+        

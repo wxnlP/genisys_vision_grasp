@@ -198,10 +198,10 @@ class Gnet:
 
     
 class Open3DGraspWindow:
-    def __init__(self, title: str, top_k: int) -> None:
+    def __init__(self, title: str, top_k: int, width: int, height: int) -> None:
         self._top_k = top_k
         self._vis = o3d.visualization.Visualizer()
-        if not self._vis.create_window(title, width=1280, height=720):
+        if not self._vis.create_window(title, width=width, height=height):
             self._vis.destroy_window()
             raise RuntimeError("Open3D visualizer window could not be created")
         self._geometries = []
