@@ -78,7 +78,8 @@ class VisionGraspModule(aimrt.ModuleBase):
         self.width = int(config["camera"]["width"])
         self.height = int(config["camera"]["height"])
         fps = int(config["camera"]["fps"])
-        self.camera = OrbbecCamera(self.width, self.height, fps)
+        hand_eye_path = str(config["hand_eye_path"])
+        self.camera = OrbbecCamera(self.width, self.height, fps, hand_eye_path=hand_eye_path)
         self.camera.open()
 
         # rpc 初始化
@@ -118,6 +119,7 @@ class VisionGraspModule(aimrt.ModuleBase):
             cv2.namedWindow("YOLO-seg", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("YOLO-seg", self.width, self.height)
             while self.running:
+                # 相机帧获取
                 color, depth = self.camera.get_frame()
                 if color is None or depth is None:
                     error_count += 1
@@ -126,12 +128,20 @@ class VisionGraspModule(aimrt.ModuleBase):
                     continue
                 else:
                     error_count = 0
+                # YOLO 推理
                 result = self.yolo_seg.predict(color)
                 idx = self.yolo_seg.select_target(self.target_class)
                 display = self.yolo_seg.draw_detections(idx)
                 cv2.imshow("YOLO-seg", display)
+                # 处理 Enter Event
                 if snapshot_requested():
-                    self.on_snapshot_event(color, depth, display)
+                    for event in self.snapshot_events:
+                        if event == "screenshot":
+                            self.do_screenshot(display)
+                        elif event == "graspnet":
+                            self.do_grasp(color, depth)
+                        else:
+                            aimrt.warn(self.logger, f"unknown snapshot_event: {event}")
                 cv2.waitKey(1)
                 if self.grasp_vis is not None and not self.grasp_vis.poll():
                     self.grasp_vis.close()
@@ -147,16 +157,6 @@ class VisionGraspModule(aimrt.ModuleBase):
                 self.grasp_vis = None
             cv2.destroyAllWindows()
             self.camera.close()
-
-    def on_snapshot_event(self, color, depth, display):
-        """回车触发：按 snapshot_event 配置依次执行。"""
-        for event in self.snapshot_events:
-            if event == "screenshot":
-                self.do_screenshot(display)
-            elif event == "graspnet":
-                self.do_grasp(color, depth)
-            else:
-                aimrt.warn(self.logger, f"unknown snapshot_event: {event}")
 
     def do_screenshot(self, display):
         path = save_color_snapshot(display, prefix="display")
@@ -215,6 +215,18 @@ class VisionGraspModule(aimrt.ModuleBase):
                    f"  width={best.width:.4f} \n"
                    f"  translation = {[round(float(v), 4) for v in best.translation]} \n"
                    f"  rotation    = {np.round(best.rotation_matrix, 4).tolist()} \n---")
+
+        # 构造齐次变换矩阵（相机 to 抓取点）
+        T_cam_grasp = np.eye(4, dtype=np.float64)
+        T_cam_grasp[:3, :3] = np.asarray(best.rotation_matrix, dtype=np.float64)
+        T_cam_grasp[:3, 3] = np.asarray(best.translation, dtype=np.float64).reshape(3)
+
+        xyz, quat = self.camera.transform_grasp_by_hand_eye(T_cam_grasp)
+
+        aimrt.info(self.logger,
+                   f"\n---\ngrasp in end-effector frame (hand-eye): \n"
+                   f"  xyz        = {[round(float(v), 6) for v in xyz]}  (m) \n"
+                   f"  quaternion = {[round(float(v), 6) for v in quat]}  (w, x, y, z) \n---")
 
     def update_grasp_vis(self):
         """刷新 Open3D 窗口；创建失败（无显示等）只禁用可视化，不影响主流程。"""

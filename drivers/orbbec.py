@@ -9,8 +9,49 @@ from pyorbbecsdk import (
             )
 
 
+import numpy as np
+
+def _rotation_matrix_to_quat_wxyz(R):
+    """旋转矩阵 -> Hamilton 四元数 (w, x, y, z)。"""
+    R = np.asarray(R, dtype=np.float64)
+    trace = R[0, 0] + R[1, 1] + R[2, 2]
+
+    if trace > 0.0:
+        s = 2.0 * np.sqrt(trace + 1.0)  # s = 4 * w
+        w = 0.25 * s
+        x = (R[2, 1] - R[1, 2]) / s
+        y = (R[0, 2] - R[2, 0]) / s
+        z = (R[1, 0] - R[0, 1]) / s
+    elif (R[0, 0] >= R[1, 1]) and (R[0, 0] >= R[2, 2]):
+        s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])  # s = 4 * x
+        w = (R[2, 1] - R[1, 2]) / s
+        x = 0.25 * s
+        y = (R[0, 1] + R[1, 0]) / s
+        z = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] >= R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])  # s = 4 * y
+        w = (R[0, 2] - R[2, 0]) / s
+        x = (R[0, 1] + R[1, 0]) / s
+        y = 0.25 * s
+        z = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])  # s = 4 * z
+        w = (R[1, 0] - R[0, 1]) / s
+        x = (R[0, 2] + R[2, 0]) / s
+        y = (R[1, 2] + R[2, 1]) / s
+        z = 0.25 * s
+
+    q = np.array([w, x, y, z], dtype=np.float64)
+    q /= np.linalg.norm(q)
+    
+    if q[0] < 0.0:
+        q = -q
+        
+    return q
+
+
 class OrbbecCamera:
-    def __init__(self, width=848, height=530, fps=30):
+    def __init__(self, width=848, height=530, fps=15, hand_eye_path=None):
         self._w = width
         self._h = height
         self._fps = fps
@@ -18,15 +59,34 @@ class OrbbecCamera:
 
         self._pipeline = None
 
+        # 手眼标定：T_result = T_ee_cam（相机系 -> 末端系）
+        self._hand_eye_T = None
+        if hand_eye_path is not None:
+            with np.load(hand_eye_path, allow_pickle=False) as data:
+                T = np.asarray(data["T_result"], dtype=np.float64)
+            self._hand_eye_T = T
+
+    def transform_grasp_by_hand_eye(self, T_cam_grasp):
+        """输入 GraspNet 的 grasp，输出末端系 xyz + 四元数 (w, x, y, z)。
+
+        变换关系：T_ee_grasp = T_ee_cam @ T_cam_grasp。
+        """
+        if self._hand_eye_T is None:
+            raise RuntimeError("hand-eye calibration is not loaded")
+
+        T_ee_grasp = self._hand_eye_T @ T_cam_grasp
+        return T_ee_grasp[:3, 3].copy(), _rotation_matrix_to_quat_wxyz(T_ee_grasp[:3, :3])
+
     def open(self):
         self._pipeline = Pipeline()
         cfg = Config()
 
         plist = self._pipeline.get_stream_profile_list(OBSensorType.COLOR_SENSOR)
         try:
-            cp = plist.get_video_stream_profile(self._w, self._h, OBFormat.RGB, self._fps)
+            cp = plist.get_video_stream_profile(self._w, self._h, OBFormat.MJPG, self._fps)
         except Exception:
             cp = plist.get_default_video_stream_profile()
+            print("[OrbbecCamera] Select default color stream profile")
         cfg.enable_stream(cp)
 
         dplist = self._pipeline.get_stream_profile_list(OBSensorType.DEPTH_SENSOR)
@@ -34,6 +94,7 @@ class OrbbecCamera:
             dp = dplist.get_video_stream_profile(self._w, self._h, OBFormat.Y16, self._fps)
         except Exception:
             dp = dplist.get_default_video_stream_profile()
+            print("[OrbbecCamera] Select default depth stream profile")
         cfg.enable_stream(dp)
 
         cfg.set_align_mode(OBAlignMode.HW_MODE)
