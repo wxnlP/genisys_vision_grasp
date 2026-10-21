@@ -33,6 +33,7 @@ class VisionGraspModule(aimrt.ModuleBase):
 
         self.snapshot_events = []
         self.target_class = "cuboid"
+        self.target_color = "blue"
         self.gnet_checkpoint = ""
         self.target_margin_px = 12
         self.target_expand_ratio = 1.35
@@ -80,7 +81,6 @@ class VisionGraspModule(aimrt.ModuleBase):
         fps = int(config["camera"]["fps"])
         hand_eye_path = str(config["hand_eye_path"])
         self.camera = OrbbecCamera(self.width, self.height, fps, hand_eye_path=hand_eye_path)
-        self.camera.open()
 
         # rpc 初始化
         self.rpc = RpcClient()
@@ -88,15 +88,16 @@ class VisionGraspModule(aimrt.ModuleBase):
         # 初始化 YOLO 模型
         self.yolo_seg = YOLOSeg(yolo_model)
 
-        if "graspnet" in self.snapshot_events:
-            self.gnet = Gnet(self.gnet_checkpoint, self.camera.get_intrinsic())
-            aimrt.info(self.logger, f"GraspNet loaded: {self.gnet_checkpoint}")
-
         return True
 
     def Start(self) -> bool:
         try:
             self.running = True
+            self.camera.open()
+            if "graspnet" in self.snapshot_events:
+                self.gnet = Gnet(self.gnet_checkpoint, self.camera.get_intrinsic())
+                aimrt.info(self.logger, f"GraspNet loaded: {self.gnet_checkpoint}")
+
             self.work_executor.ExecuteAfter(datetime.timedelta(milliseconds=500), self.main_loop)
         except Exception as e:
             aimrt.error(self.logger, f"VisionGraspModule Start failed: {e}")
@@ -130,16 +131,19 @@ class VisionGraspModule(aimrt.ModuleBase):
                     error_count = 0
                 # YOLO 推理
                 result = self.yolo_seg.predict(color)
-                idx = self.yolo_seg.select_target(self.target_class)
+                idx = self.yolo_seg.select_target(self.target_class, self.target_color)
                 display = self.yolo_seg.draw_detections(idx)
+
                 cv2.imshow("YOLO-seg", display)
                 # 处理 Enter Event
                 if snapshot_requested():
                     for event in self.snapshot_events:
                         if event == "screenshot":
+                            aimrt.info(self.logger, "screenshot requested")
                             self.do_screenshot(display)
                         elif event == "graspnet":
-                            self.do_grasp(color, depth)
+                            aimrt.info(self.logger, "graspnet requested")
+                            self.do_grasp(color, depth, result.boxes.xyxy, idx)
                         else:
                             aimrt.warn(self.logger, f"unknown snapshot_event: {event}")
                 cv2.waitKey(1)
@@ -165,19 +169,15 @@ class VisionGraspModule(aimrt.ModuleBase):
         else:
             aimrt.error(self.logger, "screenshot save failed")
 
-    def do_grasp(self, color, depth):
+    def do_grasp(self, color, depth, box_xyxy, target_idx):
         """用当前帧跑一次 GraspNet，打印最终选出的那一个候选。"""
         if self.gnet is None:
             aimrt.error(self.logger, "grasp event disabled: GraspNet not loaded")
             return
 
-        target_idx = self.yolo_seg.select_target(self.target_class)
-        if target_idx is None:
-            aimrt.warn(self.logger, f"no {self.target_class} in this frame, skip grasp")
-            return
-        bbox = tuple(int(v) for v in self.yolo_seg.result.boxes.xyxy[target_idx])
+        bbox = tuple(int(v) for v in box_xyxy[target_idx])
 
-        boxes = self.yolo_seg.result.boxes.xyxy.cpu().numpy()
+        boxes = box_xyxy.cpu().numpy()
         roi = (boxes[:, 0].min(), boxes[:, 1].min(), boxes[:, 2].max(), boxes[:, 3].max())
 
         try:
