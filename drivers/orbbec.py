@@ -86,7 +86,7 @@ class OrbbecCamera:
             cp = plist.get_video_stream_profile(self._w, self._h, OBFormat.MJPG, self._fps)
         except Exception:
             cp = plist.get_default_video_stream_profile()
-            print("[OrbbecCamera] Select default color stream profile")
+            print("[OrbbecCamera] Select default color stream profile, please make sure it's currently USB 3.0")
         cfg.enable_stream(cp)
 
         dplist = self._pipeline.get_stream_profile_list(OBSensorType.DEPTH_SENSOR)
@@ -94,7 +94,7 @@ class OrbbecCamera:
             dp = dplist.get_video_stream_profile(self._w, self._h, OBFormat.Y16, self._fps)
         except Exception:
             dp = dplist.get_default_video_stream_profile()
-            print("[OrbbecCamera] Select default depth stream profile")
+            print("[OrbbecCamera] Select default depth stream profile, please make sure it's currently USB 3.0")
         cfg.enable_stream(dp)
 
         cfg.set_align_mode(OBAlignMode.HW_MODE)
@@ -151,10 +151,15 @@ class OrbbecCamera:
         w, h = c_frame.get_width(), c_frame.get_height()
         raw = np.asanyarray(c_frame.get_data(), dtype=np.uint8)
         fmt = c_frame.get_format()
+        color_bgr = None
         if fmt == OBFormat.MJPG:
             color_bgr = cv2.imdecode(raw, cv2.IMREAD_COLOR)
-        elif fmt == OBFormat.RGB:
-            color_bgr = cv2.cvtColor(raw.reshape(h, w, 3), cv2.COLOR_RGB2BGR)
+        elif fmt == OBFormat.YUYV:
+            color_bgr = cv2.cvtColor(raw.reshape(h, w, 2), cv2.COLOR_YUV2BGR_YUY2)
+
+        if color_bgr is None:
+            print("[OrbbecCamera] Unsupported color format: {fmt}")
+            return None, None
 
         # 深度帧
         d_frame = frames.get_depth_frame()
