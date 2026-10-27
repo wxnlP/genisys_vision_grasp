@@ -1,0 +1,17 @@
+// Jetson 侧订阅 genisys（RK3588, 192.168.12.14）的 zenoh 连接配置。
+//
+// 控制器（genisys）在另一台 RK3588 上以 peer 模式监听 tcp/0.0.0.0:7447，
+// 这里显式 connect 过去，不依赖组播自动发现（直连网线时组播经常不生效）。
+// 对端 IP 变化时只改这一行。
+{
+  mode: "peer",
+
+  connect: {
+    endpoints: ["tcp/192.168.12.14:7447"]
+  },
+
+  // 保留组播，同网段时仍可零配置发现。
+  scouting: {
+    multicast: { enabled: true }
+  }
+}

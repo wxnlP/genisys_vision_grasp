@@ -32,6 +32,8 @@ aimrt:
       #       listen_port: 50081
       - name: zenoh_plugin
         path: ${AIMRT_PLUGIN_DIR}/libaimrt_zenoh_plugin.so
+        options:
+          native_cfg_path: ${AIMRT_SH_DIR}/cfg/zenoh_native_config.json5
 
   channel:
     backends:
@@ -48,7 +50,7 @@ aimrt:
 # Module custom configuration
 VisionGraspModule:
   work_executor_name: work_thread_pool
-  hand_eye_path: ${AIMRT_SH_DIR}/cfg/hand_eye/hand_eye-015.npz
+  hand_eye_path: ${AIMRT_SH_DIR}/cfg/hand_eye/hand_eye.npz
   camera:
     width: 848
     height: 530
