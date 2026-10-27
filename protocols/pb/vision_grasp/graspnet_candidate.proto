@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+import "error.proto";
+import "pose.proto";
+
+package vision_graspnet.graspnet_candidate;
+
+message GraspCandidateRequest {
+  string target_class = 1;
+  string target_color = 2;
+  uint32 max_candidates = 3;
+}
+
+message GraspCandidate {
+  uint32 rank = 1;
+  float  score = 2;
+  float  width = 3;
+  genisys.protocols.Pose flange_grasp_pose = 4;
+}
+
+message GraspCandidateResponse {
+  repeated GraspCandidate candidates = 1;
+  aimrt.protocols.common.Error error = 2;
+}
+
+service GraspCandidateService {
+  rpc GetGraspCandidates(GraspCandidateRequest) returns (GraspCandidateResponse);
+}
