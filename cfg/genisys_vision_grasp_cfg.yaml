@@ -23,17 +23,36 @@ aimrt:
         log_lvl: INFO
   plugin:
     plugins:
-      # - name: net_plugin
-      #   path: ${AIMRT_PLUGIN_DIR}/libaimrt_net_plugin.so
-      #   options:
-      #     thread_num: 2
-      #     tcp_options:
-      #       listen_ip: 127.0.0.1
-      #       listen_port: 50081
+      - name: net_plugin
+        path: ${AIMRT_PLUGIN_DIR}/libaimrt_net_plugin.so
+        options:
+          thread_num: 2
+          http_options:
+            listen_ip: 0.0.0.0
+            listen_port: 18080
       - name: zenoh_plugin
         path: ${AIMRT_PLUGIN_DIR}/libaimrt_zenoh_plugin.so
         options:
           native_cfg_path: ${AIMRT_SH_DIR}/cfg/zenoh_native_config.json5
+
+  rpc:
+    backends:
+      - type: http
+      - type: zenoh
+        options:
+          timeout_executor: work_thread_pool
+          clients_options:
+            - func_name: "(.*)"
+              shm_enabled: false
+          servers_options:
+            - func_name: "(.*)"
+              shm_enabled: false
+    clients_options:
+      - func_name: "(.*)"
+        enable_backends: [zenoh]
+    servers_options:
+      - func_name: "(.*)"
+        enable_backends: [zenoh, http]
 
   channel:
     backends:

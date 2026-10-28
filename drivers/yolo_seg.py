@@ -31,6 +31,9 @@ class YOLOSeg:
 
         return self.result
 
+    def get_boxes_xyxy(self):
+        return self.result.boxes.xyxy.cpu().numpy()
+
     def select_target(self, target_class: str, target_color: str = None):
         if self.result is None: 
             return None

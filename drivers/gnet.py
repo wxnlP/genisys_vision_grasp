@@ -47,7 +47,8 @@ class Gnet:
             pred_decode(out)
         torch.cuda.synchronize()
 
-    def build_end_points(self, color_bgr, depth_mm, roi=None, roi_expand_ratio=1.35, roi_margin_px=20):
+    def build_end_points(self, color_bgr, depth_mm, roi=None, roi_expand_ratio=1.35, roi_margin_px=20,
+                         build_o3d=True):
         depth_mask = (depth_mm > self.min_mm) & (depth_mm < self.max_mm)
         if int(depth_mask.sum()) == 0:
             raise RuntimeError("No valid depth_mm pixels in the configured depth range.")
@@ -97,12 +98,14 @@ class Gnet:
             "cloud_colors": sampled_color,
         }
 
-        o3d_cloud = o3d.geometry.PointCloud()
-        o3d_cloud.points = o3d.utility.Vector3dVector(sampled_cloud.astype(np.float32))
-        o3d_cloud.colors = o3d.utility.Vector3dVector(sampled_color.astype(np.float32))
-
         self.end_points = end_points
-        self.o3d_cloud = o3d_cloud
+        if build_o3d:
+            o3d_cloud = o3d.geometry.PointCloud()
+            o3d_cloud.points = o3d.utility.Vector3dVector(sampled_cloud.astype(np.float32))
+            o3d_cloud.colors = o3d.utility.Vector3dVector(sampled_color.astype(np.float32))
+            self.o3d_cloud = o3d_cloud
+        else:
+            self.o3d_cloud = None
         self.raw_cloud = cloud[depth_mask]
 
         self.counts = {"depth_ok": int(depth_mask.sum()), "input": int(mask.sum())}
@@ -164,6 +167,7 @@ class Gnet:
         keep = valid_z & (u >= x1) & (u <= x2) & (v >= y1) & (v <= y2)
         self.gg = self.gg[keep]
         self.counts["after_bbox"] = len(self.gg)
+        return self.gg
 
     def filter_grasps_by_width(self, max_width_m):
         if max_width_m is None or len(self.gg) == 0:
@@ -171,17 +175,20 @@ class Gnet:
             return self.gg
         self.gg = self.gg[np.asarray(self.gg.widths, dtype=np.float64) <= float(max_width_m)]
         self.counts["after_width"] = len(self.gg)
+        return self.gg
 
-    def select_best_grasp(self):
+    def sort_grasps(self):
+        """NMS 去重后按分数从高到低排序。"""
         if len(self.gg) == 0:
             self.counts["final"] = 0
-            return None
+            return self.gg
         self.gg = self.gg.nms()
         self.gg.sort_by_score()
         self.counts["final"] = len(self.gg)
-        if len(self.gg) == 0:
-            return None
-        return self.gg[0]
+        return self.gg
+
+    def get_gg_length(self):
+        return len(self.gg)
 
     def draw_best_grasp_projection(self, display, grasp):
         if grasp is None:

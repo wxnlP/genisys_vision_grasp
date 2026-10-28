@@ -1,14 +1,20 @@
 import aimrt_py as aimrt
-from protocols.joint_state_pb2 import JointStateArray
-from protocols.pose_pb2 import PoseStamped
 import yaml
 
+from aimrt_modules.grasp_candidate_service import (
+    GraspCandidateServiceImpl,
+    GraspServiceError,
+    ERR_INFERENCE_FAILED,
+    ERR_NO_CANDIDATE,
+    ERR_NO_TARGET,
+)
 from drivers.http_rpc import RpcClient
 from drivers.orbbec import OrbbecCamera
 from drivers.utils.snapshot import save_color_snapshot, snapshot_requested
 from drivers.gnet import Gnet, Open3DGraspWindow
 from drivers.yolo_seg import YOLOSeg
 
+import threading
 import time
 import datetime
 import numpy as np
@@ -41,6 +47,15 @@ class VisionGraspModule(aimrt.ModuleBase):
         self.roi_expand_ratio = 1.35
         self.roi_margin_px = 20
 
+        self.grasp_service = None
+
+        # 主循环缓存最近一帧图像和深度
+        self._latest_depth = None
+        self._latest_color = None
+
+        # YOLO 与 GraspNet 共用 GPU，用一把锁串起来
+        self.infer_lock = threading.RLock()
+
         # Open3D 可视化窗口
         self.grasp_vis = None
         self.grasp_vis_broken = False
@@ -71,7 +86,7 @@ class VisionGraspModule(aimrt.ModuleBase):
         self.max_grasp_width_m = float(config["graspnet"]["max_grasp_width_m"])
         self.roi_expand_ratio = float(config["graspnet"]["roi_expand_ratio"])
         self.roi_margin_px = int(config["graspnet"]["roi_margin_px"])
-        
+
         # 创建任务执行器
         self.work_executor = self.core.GetExecutorManager().GetExecutor(work_executor_name)
 
@@ -88,17 +103,23 @@ class VisionGraspModule(aimrt.ModuleBase):
         # 初始化 YOLO 模型
         self.yolo_seg = YOLOSeg(yolo_model)
 
+        # 注册 GraspCandidateService
+        self.grasp_service = GraspCandidateServiceImpl(self.infer_grasp_candidates, self.logger)
+        if not self.core.GetRpcHandle().RegisterService(self.grasp_service):
+            aimrt.error(self.logger, "register GraspCandidateService failed")
+            return False
+        aimrt.info(self.logger, "GraspCandidateService registered.")
+
         return True
 
     def Start(self) -> bool:
         try:
             self.running = True
             self.camera.open()
-            if "graspnet" in self.snapshot_events:
-                self.gnet = Gnet(self.gnet_checkpoint, self.camera.get_intrinsic())
-                self.gnet.warmup()
-                aimrt.info(self.logger, f"GraspNet loaded: {self.gnet_checkpoint}")
-            
+            self.gnet = Gnet(self.gnet_checkpoint, self.camera.get_intrinsic())
+            self.gnet.warmup()
+            aimrt.info(self.logger, f"GraspNet loaded: {self.gnet_checkpoint}")
+
             self.work_executor.ExecuteAfter(datetime.timedelta(milliseconds=500), self.main_loop)
         except Exception as e:
             aimrt.error(self.logger, f"VisionGraspModule Start failed: {e}")
@@ -114,9 +135,9 @@ class VisionGraspModule(aimrt.ModuleBase):
             aimrt.info(self.logger, "VisionGraspModule shutdown.")
         except Exception as e:
             aimrt.error(self.logger, f"VisionGraspModule shutdown failed: {e}")
-    
+
     def main_loop(self):
-        error_count  = 0
+        error_count = 0
         try:
             try:
                 self.grasp_vis = Open3DGraspWindow("GraspNet Grasps", top_k=50, width=self.width, height=self.height)
@@ -135,23 +156,18 @@ class VisionGraspModule(aimrt.ModuleBase):
                     continue
                 else:
                     error_count = 0
-                # YOLO 推理
-                result = self.yolo_seg.predict(color)
-                idx = self.yolo_seg.select_target(self.target_class, self.target_color)
-                display = self.yolo_seg.draw_detections(idx)
+                # YOLO 常驻推理；默认不选目标，只画所有检测框
+                with self.infer_lock:
+                    self.yolo_seg.predict(color)
+                    self._latest_color = color
+                    self._latest_depth = depth
+                    # 默认无目标，不做强调draw
+                    display = self.yolo_seg.draw_detections(None)
 
                 cv2.imshow("YOLO-seg", display)
                 # 处理 Enter Event
                 if snapshot_requested():
-                    for event in self.snapshot_events:
-                        if event == "screenshot":
-                            aimrt.info(self.logger, "screenshot requested")
-                            self.do_screenshot(display)
-                        elif event == "graspnet":
-                            aimrt.info(self.logger, "graspnet requested")
-                            self.do_grasp(color, depth, result.boxes.xyxy, idx)
-                        else:
-                            aimrt.warn(self.logger, f"unknown snapshot_event: {event}")
+                    self.handle_snapshot_events(color, depth, display)
                 cv2.waitKey(1)
                 if self.grasp_vis is not None and not self.grasp_vis.poll():
                     self.grasp_vis.close()
@@ -168,6 +184,102 @@ class VisionGraspModule(aimrt.ModuleBase):
             cv2.destroyAllWindows()
             self.camera.close()
 
+    def handle_snapshot_events(self, color, depth, display):
+        for event in self.snapshot_events:
+            if event == "screenshot":
+                aimrt.info(self.logger, "screenshot requested")
+                self.do_screenshot(display)
+            elif event == "graspnet":
+                aimrt.info(self.logger, "graspnet requested")
+                with self.infer_lock:
+                    idx = self.yolo_seg.select_target(self.target_class, self.target_color)
+                    result = self.yolo_seg.result
+                if idx is None or result is None:
+                    aimrt.warn(self.logger, "grasp event skipped: no target")
+                    continue
+                self.do_grasp(color, depth, result.boxes.xyxy.cpu().numpy(), idx)
+            else:
+                aimrt.warn(self.logger, f"unknown snapshot_event: {event}")
+
+    def get_graspnet_candidates(self, color, depth, boxes, target_idx, max_candidates,
+                           detect_collision=False, build_o3d=False):
+        """GraspNet 的共用主流程（不含选目标），RPC 与 Enter 两条路径都走这里。
+
+        bbox/ROI -> 点云 -> 前向 -> bbox 过滤 -> (碰撞检测) -> 宽度过滤 ->
+        NMS/排序取前 max_candidates。调用方必须已持有 infer_lock。
+        """
+        bbox = tuple(int(v) for v in boxes[target_idx])
+        # ROI 裁剪视野
+        roi = (boxes[:, 0].min(), boxes[:, 1].min(), boxes[:, 2].max(), boxes[:, 3].max())
+
+        self.gnet.build_end_points(
+            color, depth, roi=roi,
+            roi_expand_ratio=self.roi_expand_ratio,
+            roi_margin_px=self.roi_margin_px,
+            build_o3d=build_o3d,
+        )
+        self.gnet.decode_grasp()
+        self.gnet.filter_grasps_by_bbox(
+            bbox, depth.shape, self.target_margin_px, self.target_expand_ratio
+        )
+        if detect_collision:
+            self.gnet.detect_collision()
+        self.gnet.filter_grasps_by_width(self.max_grasp_width_m)
+
+        gg = self.gnet.sort_grasps()
+        cand_count = min(max(0, max_candidates), self.gnet.get_gg_length())
+
+        return [gg[i] for i in range(cand_count)]
+
+    def infer_grasp_candidates(self, target_class, target_color, max_candidates):
+        """GraspNet 解码 -> bbox 过滤 -> 宽度过滤 -> NMS/排序 -> 手眼变换"""
+        if self.gnet is None:
+            raise GraspServiceError(ERR_INFERENCE_FAILED, "graspnet is not loaded")
+
+        limit = max(0, int(max_candidates))
+
+        with self.infer_lock:
+            color = self._latest_color
+            depth = self._latest_depth
+            if color is None or depth is None:
+                raise GraspServiceError(ERR_INFERENCE_FAILED, "no frame cached yet")
+
+            idx = self.yolo_seg.select_target(target_class, target_color)
+            if idx is None:
+                raise GraspServiceError(
+                    ERR_NO_TARGET,
+                    f"no target detected: class={target_class!r} color={target_color!r}",
+                )
+
+            boxes_xyxy = self.yolo_seg.get_boxes_xyxy()
+            try:
+                grasps = self.get_graspnet_candidates(
+                    color, depth, boxes_xyxy, idx, limit,
+                    detect_collision=False, build_o3d=False,
+                )
+            except GraspServiceError:
+                raise
+            except Exception as e:
+                raise GraspServiceError(ERR_INFERENCE_FAILED, f"grasp inference failed: {e}")
+
+            candidates = []
+            for g in grasps:
+                # 手眼变换：相机 -> 法兰
+                T_cam_grasp = np.eye(4, dtype=np.float64)
+                T_cam_grasp[:3, :3] = np.asarray(g.rotation_matrix, dtype=np.float64)
+                T_cam_grasp[:3, 3] = np.asarray(g.translation, dtype=np.float64).reshape(3)
+                xyz, quat = self.camera.transform_grasp_by_hand_eye(T_cam_grasp)
+                candidates.append({
+                    "score": float(g.score),
+                    "width": float(g.width),
+                    "position": [float(v) for v in xyz],
+                    "orientation": [float(v) for v in quat],
+                })
+
+        if limit > 0 and not candidates:
+            raise GraspServiceError(ERR_NO_CANDIDATE, "no grasp candidate after width filter")
+        return candidates
+
     def do_screenshot(self, display):
         path = save_color_snapshot(display, prefix="display")
         if path:
@@ -181,26 +293,21 @@ class VisionGraspModule(aimrt.ModuleBase):
             aimrt.error(self.logger, "grasp event disabled: GraspNet not loaded")
             return
 
-        bbox = tuple(int(v) for v in box_xyxy[target_idx])
+        with self.infer_lock:
+            try:
+                grasps = self.get_graspnet_candidates(
+                    color, depth, box_xyxy, target_idx, 1,
+                    detect_collision=True, build_o3d=True,
+                )
+            except Exception as e:
+                aimrt.error(self.logger, f"grasp inference failed: {e}")
+                return
 
-        boxes = box_xyxy.cpu().numpy()
-        roi = (boxes[:, 0].min(), boxes[:, 1].min(), boxes[:, 2].max(), boxes[:, 3].max())
-
-        try:
-            self.gnet.build_end_points(color, depth, roi=roi,
-                                       roi_expand_ratio=self.roi_expand_ratio,
-                                       roi_margin_px=self.roi_margin_px)
-            self.gnet.decode_grasp()
-            self.gnet.filter_grasps_by_bbox(bbox, depth.shape, self.target_margin_px, self.target_expand_ratio)
-            self.gnet.detect_collision()
-            self.gnet.filter_grasps_by_width(self.max_grasp_width_m)
-            best = self.gnet.select_best_grasp()
-        except Exception as e:
-            aimrt.error(self.logger, f"grasp inference failed: {e}")
-            return
+            best = grasps[0] if grasps else None
+            cloud, gg = self.gnet.o3d_cloud, self.gnet.gg
 
         if not self.grasp_vis_broken:
-            self.grasp_vis.update(self.gnet.o3d_cloud, self.gnet.gg)
+            self.grasp_vis.update(cloud, gg)
 
         c = self.gnet.counts
         aimrt.info(self.logger,
@@ -217,22 +324,16 @@ class VisionGraspModule(aimrt.ModuleBase):
             aimrt.warn(self.logger, "no valid grasp candidate")
             return
 
-        aimrt.info(self.logger, 
+        aimrt.info(self.logger,
                    f"\n---\ngrasp candidate: \n"
                    f"  score={best.score:.4f} \n"
                    f"  width={best.width:.4f} \n"
                    f"  translation = {[round(float(v), 4) for v in best.translation]} \n"
                    f"  rotation    = {np.round(best.rotation_matrix, 4).tolist()} \n---")
 
-        # 构造齐次变换矩阵（相机 to 抓取点）
-        T_cam_grasp = np.eye(4, dtype=np.float64)
-        T_cam_grasp[:3, :3] = np.asarray(best.rotation_matrix, dtype=np.float64)
-        T_cam_grasp[:3, 3] = np.asarray(best.translation, dtype=np.float64).reshape(3)
-
-        xyz, quat = self.camera.transform_grasp_by_hand_eye(T_cam_grasp)
+        xyz, quat = self.grasp_pose(best)
 
         aimrt.info(self.logger,
                    f"\n---\ngrasp in end-effector frame (hand-eye): \n"
                    f"  xyz        = {[round(float(v), 6) for v in xyz]}  (m) \n"
                    f"  quaternion = {[round(float(v), 6) for v in quat]}  (w, x, y, z) \n---")
-        
